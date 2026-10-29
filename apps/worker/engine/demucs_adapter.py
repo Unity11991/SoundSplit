@@ -13,6 +13,13 @@ from apps.worker.engine.base import SeparationModelAdapter
 
 logger = logging.getLogger("stemlab.demucs")
 
+# Support Hugging Face Spaces ZeroGPU acceleration if available
+try:
+    import spaces
+    gpu_decorator = spaces.GPU(duration=120)
+except Exception:
+    gpu_decorator = lambda f: f
+
 
 class DemucsModelAdapter(SeparationModelAdapter):
     def __init__(self, model_name: str = "htdemucs"):
@@ -323,6 +330,7 @@ class DemucsModelAdapter(SeparationModelAdapter):
         return self._normalize_audio(enhanced_stereo)
 
 
+    @gpu_decorator
     def separate(
         self,
         input_audio_path: Path,
@@ -339,6 +347,12 @@ class DemucsModelAdapter(SeparationModelAdapter):
             if progress_callback:
                 progress_callback(10, "Initializing AI neural network")
             self.load()
+
+        # Under Hugging Face ZeroGPU, move models to GPU context dynamically
+        if torch.cuda.is_available() and self._device.type != "cuda":
+            self._device = torch.device("cuda")
+            if self._model is not None:
+                self._model.to(self._device)
 
         output_dir.mkdir(parents=True, exist_ok=True)
 
