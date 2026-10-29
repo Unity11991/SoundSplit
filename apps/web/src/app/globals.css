@@ -1,0 +1,74 @@
+@import "tailwindcss";
+
+:root {
+  --background: #0b0d13;
+  --foreground: #f3f4f6;
+  --card: #121622;
+  --card-border: #1f2738;
+  --card-hover: #192030;
+  --primary-accent: #8b5cf6;
+  --secondary-accent: #06b6d4;
+  --muted: #6b7280;
+}
+
+body {
+  background-color: var(--background);
+  color: var(--foreground);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  overflow-x: hidden;
+}
+
+/* Custom dark scrollbar */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: #0b0d13;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #1f2738;
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #2f3b54;
+}
+
+/* Audio Fader Slider */
+input[type="range"].fader {
+  -webkit-appearance: none;
+  appearance: none;
+  background: #1a2232;
+  border-radius: 4px;
+  outline: none;
+  height: 6px;
+}
+
+input[type="range"].fader::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: #8b5cf6;
+  cursor: pointer;
+  box-shadow: 0 0 8px rgba(139, 92, 246, 0.6);
+  transition: transform 0.1s ease;
+}
+
+input[type="range"].fader::-webkit-slider-thumb:hover {
+  transform: scale(1.2);
+}
+
+/* LED Indicator animations */
+@keyframes pulse-subtle {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
+}
+
+.animate-led {
+  animation: pulse-subtle 2s infinite ease-in-out;
+}

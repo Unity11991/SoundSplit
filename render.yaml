@@ -1,0 +1,20 @@
+services:
+  # SoundSplit AI Audio Separation Backend Service
+  - type: web
+    name: soundsplit-api
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    plan: starter  # Minimum 2GB RAM required for PyTorch + Demucs model inference
+    healthCheckPath: /api/v1/health
+    envVars:
+      - key: MAX_UPLOAD_SIZE_MB
+        value: 100
+      - key: MAX_AUDIO_DURATION_SECONDS
+        value: 600
+      - key: RETENTION_HOURS
+        value: 24
+      - key: SECRET_KEY
+        generateValue: true
+      - key: CORS_ORIGINS
+        value: "*"

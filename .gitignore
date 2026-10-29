@@ -1,0 +1,78 @@
+# Environment & Secrets
+.env
+.env.local
+.env.*.local
+*.env
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+.venv/
+venv/
+ENV/
+
+# Node / Next.js
+node_modules/
+.next/
+out/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+# Databases & Storage
+*.db
+*.sqlite
+*.sqlite3
+storage/inputs/*
+storage/outputs/*
+storage/exports/*
+!storage/inputs/.gitkeep
+!storage/outputs/.gitkeep
+!storage/exports/.gitkeep
+
+# Model weights
+models/*.th
+models/*.pt
+models/*.onnx
+models/*.bin
+*.th
+*.pt
+
+# Media & Temporary files
+*.wav
+*.mp3
+*.flac
+*.m4a
+*.ogg
+scratch/
+cloudflared*
+*.exe
+
+# Testing & Diagnostics
+.pytest_cache/
+.coverage
+htmlcov/
+.turbo/
+*.tsbuildinfo
+.DS_Store
+Thumbs.db
+

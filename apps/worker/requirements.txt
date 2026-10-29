@@ -1,0 +1,10 @@
+demucs>=4.0.1
+torch>=2.2.0
+torchaudio>=2.2.0
+soundfile>=0.12.1
+numpy>=1.26.0
+scipy>=1.13.0
+redis>=5.0.0
+sqlalchemy>=2.0.0
+pydantic>=2.8.0
+pydantic-settings>=2.4.0
