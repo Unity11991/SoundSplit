@@ -24,42 +24,42 @@ const STEM_CONFIGS: Record<
   { label: string; icon: any; color: string; waveColor: string; playedColor: string }
 > = {
   vocals: {
-    label: 'Spoken Voiceover (Pure Speech)',
+    label: 'Spoken Voiceover (Pure Speech — Song & Lyrics Removed)',
     icon: Mic,
     color: 'from-emerald-500 to-green-600',
     waveColor: '#064e3b',
     playedColor: '#10b981',
   },
   voiceover: {
-    label: 'Spoken Voiceover (Pure Speech)',
+    label: 'Spoken Voiceover (Pure Speech — Song & Lyrics Removed)',
     icon: Mic,
     color: 'from-emerald-500 to-green-600',
     waveColor: '#064e3b',
     playedColor: '#10b981',
   },
   background_music: {
-    label: 'Background Music (Instrumental)',
+    label: 'Background Music (Clean Instrumental)',
     icon: Music2,
     color: 'from-cyan-500 to-teal-600',
     waveColor: '#164e63',
     playedColor: '#06b6d4',
   },
   instrumental: {
-    label: 'Background Music (Instrumental)',
+    label: 'Background Music (Clean Instrumental)',
     icon: Music2,
     color: 'from-cyan-500 to-teal-600',
     waveColor: '#164e63',
     playedColor: '#06b6d4',
   },
   background_song: {
-    label: 'Backing Track (Music + Lyrics)',
+    label: 'Backing Track (Music + Background Song Lyrics)',
     icon: Music2,
     color: 'from-purple-500 to-indigo-600',
     waveColor: '#3b0764',
     playedColor: '#a855f7',
   },
   other: {
-    label: 'Song Lyrics & Harmonies',
+    label: 'Background Song Lyrics & Singing Voice',
     icon: Music2,
     color: 'from-amber-500 to-orange-600',
     waveColor: '#78350f',

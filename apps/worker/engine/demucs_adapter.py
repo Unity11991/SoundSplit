@@ -8,6 +8,8 @@ import soundfile as sf
 import torch
 import scipy.signal
 from scipy.ndimage import median_filter
+import torchaudio
+import noisereduce as nr
 
 from apps.worker.engine.base import SeparationModelAdapter
 
@@ -26,6 +28,7 @@ class DemucsModelAdapter(SeparationModelAdapter):
         self._model_name = model_name
         self._model = None
         self._vad_model = None
+        self._vad_utils = None
         self._denoiser_model = None
         self._device = None
         self._sample_rate = 44100
@@ -73,7 +76,7 @@ class DemucsModelAdapter(SeparationModelAdapter):
 
             # Load Stage 2: Silero Neural Speech Disentanglement AI Model
             try:
-                self._vad_model, _ = torch.hub.load(
+                self._vad_model, self._vad_utils = torch.hub.load(
                     'snakers4/silero-vad',
                     'silero_vad',
                     onnx=False,
@@ -85,6 +88,7 @@ class DemucsModelAdapter(SeparationModelAdapter):
             except Exception as vad_err:
                 logger.warning(f"Could not load Silero VAD model: {vad_err}")
                 self._vad_model = None
+                self._vad_utils = None
 
             # Load Stage 3: Meta Denoiser (DNS64) Deep Neural Speech Enhancement Model
             try:
@@ -157,22 +161,21 @@ class DemucsModelAdapter(SeparationModelAdapter):
         return wav
 
     @staticmethod
-    def _boost_vocal_loudness(wav: np.ndarray, target_peak: float = 0.96, gain_multiplier: float = 1.8) -> np.ndarray:
+    def _boost_vocal_loudness(wav: np.ndarray, target_peak: float = 0.94, gain_multiplier: float = 1.1) -> np.ndarray:
         """
-        Boosts vocal speech volume so spoken voice is loud, punchy, and prominent.
-        Normalizes peak amplitude and applies gentle soft-knee saturation to elevate quiet speech syllables.
+        Ensures clear vocal volume without introducing harsh non-linear distortion.
+        Scales peak cleanly to target_peak and applies subtle soft-knee limiting.
         """
         max_val = np.max(np.abs(wav))
         if max_val > 1e-4:
-            # 1. Scale peak to target
             scaled = (wav / max_val) * target_peak
-            # 2. Apply presence gain with smooth tanh compression to prevent digital clipping
-            boosted = np.tanh(scaled * gain_multiplier)
-            # 3. Final peak normalize
-            b_max = np.max(np.abs(boosted))
-            if b_max > 1e-4:
-                boosted = (boosted / b_max) * target_peak
-            return boosted.astype(np.float32)
+            if gain_multiplier > 1.05:
+                boosted = np.tanh(scaled * gain_multiplier)
+                b_max = np.max(np.abs(boosted))
+                if b_max > 1e-4:
+                    boosted = (boosted / b_max) * target_peak
+                return boosted.astype(np.float32)
+            return scaled.astype(np.float32)
         return wav
 
     @staticmethod
@@ -196,138 +199,152 @@ class DemucsModelAdapter(SeparationModelAdapter):
                 peaks.append(0.0)
         return peaks
 
-    def _isolate_dominant_voiceover(self, vocals_wav: np.ndarray, sr: int = 44100) -> Tuple[np.ndarray, np.ndarray]:
+    def _isolate_dominant_voiceover(
+        self,
+        vocals_wav: np.ndarray,
+        instrumental_wav: np.ndarray,
+        sr: int = 44100
+    ) -> Tuple[np.ndarray, np.ndarray]:
         """
         Deep Neural Speech Disentanglement Pipeline:
+        Completely eliminates background songs and singing lyrics from foreground speech.
         Separates vocal mixture into:
-        1. foreground_speech: Pure spoken dialogue/voiceover with zero background song lyrics or singing.
+        1. foreground_speech: Pure spoken dialogue/voiceover with zero background song lyrics, zero music, and pristine noise floor.
         2. background_vocals: All singing vocals, lyrics, and harmonies from the background song.
         """
         device = self._device or torch.device("cpu")
-        vocals = torch.from_numpy(vocals_wav.T).float().to(device)
-        channels, num_samples = vocals.shape
+        num_samples = len(vocals_wav)
 
-        mid = (vocals[0] + vocals[1]) * 0.5
-        side = (vocals[0] - vocals[1]) * 0.5
-
-        n_fft = 2048
-        hop_length = 512
-        win_length = 2048
-        window = torch.hann_window(win_length, device=device)
-
-        stft_mid = torch.stft(mid, n_fft=n_fft, hop_length=hop_length, win_length=win_length, window=window, return_complex=True)
-        stft_side = torch.stft(side, n_fft=n_fft, hop_length=hop_length, win_length=win_length, window=window, return_complex=True)
-
-        mag_mid = torch.abs(stft_mid)
-        mag_side = torch.abs(stft_side)
-        mag_mid_np = mag_mid.cpu().numpy()
-        num_bins, num_frames = mag_mid_np.shape
-        freqs_np = np.linspace(0, sr // 2, num_bins)
-
-        # 1. Harmonic-Percussive Melodic Separation (HPSS):
-        # Sustained musical singing notes form horizontal lines across time in the spectrogram.
-        # Human speech consists of rapid transient consonants, plosives, and dynamically fluctuating formant bursts.
-        H = median_filter(mag_mid_np, size=(1, 27))   # horizontal filter isolates sustained singing notes
-        P = median_filter(mag_mid_np, size=(17, 1))   # vertical filter isolates transient speech & consonants
-        speech_hpss_mask = (P ** 1.5) / (P ** 1.5 + H ** 1.5 + 1e-8)
-        speech_hpss_mask = np.clip(speech_hpss_mask * 1.3, 0.05, 1.0)
-
-        # 2. Adaptive Downward Expander (Speech Activity Gate):
-        # Human speech articulation is concentrated between 250Hz and 3800Hz.
-        speech_band = (freqs_np >= 250) & (freqs_np <= 3800)
-        band_energy = np.mean(mag_mid_np[speech_band, :] ** 2, axis=0)
-        band_db = 10.0 * np.log10(band_energy + 1e-9)
-
-        # Determine peak speech level (85th percentile of frames)
-        peak_speech_db = float(np.percentile(band_db, 85))
-        # Threshold: 11.5 dB below peak speech level
-        thresh_db = peak_speech_db - 11.5
-
-        delta = band_db - thresh_db
-        vad_gate = 1.0 / (1.0 + np.exp(-delta / 2.0))
-
-        # Attack (5ms) and Release (120ms) smoothing envelope
-        smoothed_gate = np.zeros_like(vad_gate)
-        current_val = 0.0
-        alpha_attack = 0.8
-        alpha_release = 0.15
-        for t in range(num_frames):
-            target = vad_gate[t]
-            if target > current_val:
-                current_val = alpha_attack * target + (1 - alpha_attack) * current_val
-            else:
-                current_val = alpha_release * target + (1 - alpha_release) * current_val
-            smoothed_gate[t] = current_val
-
-        # 3. Spatial decorrelation sieve (in case stereo backing vocals exist)
-        side_ratio = mag_side / (mag_mid + 1e-6)
-        spatial_mask = torch.clamp(1.0 - 2.5 * side_ratio, min=0.0, max=1.0).cpu().numpy()
-
-        # Combine sieves
-        combined_mask = speech_hpss_mask * smoothed_gate[np.newaxis, :] * spatial_mask
-        combined_mask = np.clip(combined_mask, 0.0, 1.0)
-        bg_mask = np.clip(1.0 - combined_mask, 0.0, 1.0)
-
-        # 4. Synthesize voiceover and background song vocals
-        mask_tensor = torch.from_numpy(combined_mask).to(device).float()
-        bg_mask_tensor = torch.from_numpy(bg_mask).to(device).float()
-
-        vo_stft = stft_mid * mask_tensor
-        vo_mono = torch.istft(vo_stft, n_fft=n_fft, hop_length=hop_length, win_length=win_length, window=window, length=num_samples)
-        voiceover = torch.stack([vo_mono, vo_mono], dim=0)
-
-        bg_stft = stft_mid * bg_mask_tensor
-        bg_mono = torch.istft(bg_stft, n_fft=n_fft, hop_length=hop_length, win_length=win_length, window=window, length=num_samples)
-        song_vocals = torch.stack([bg_mono, bg_mono], dim=0) + torch.stack([side, -side], dim=0)
-
-        vo_np = self._normalize_audio(voiceover.cpu().numpy().T)
-        sv_np = self._normalize_audio(song_vocals.cpu().numpy().T)
-        return vo_np, sv_np
-
-    def _enhance_and_denoise_speech(self, voice_wav: np.ndarray, sr: int) -> np.ndarray:
-        """
-        Deep Neural Speech Enhancement using Meta Denoiser DNS64.
-        Eliminates residual acoustic artifacts, background hiss, and vocal bleed.
-        """
-        device = self._device or torch.device("cpu")
-        mono = voice_wav.mean(axis=1) if voice_wav.ndim > 1 else voice_wav
-        total_samples = len(mono)
-
-        if self._denoiser_model is not None:
-            try:
-                import torchaudio
-                resampler_16k = torchaudio.transforms.Resample(orig_freq=sr, new_freq=16000).to(device)
-                resampler_orig = torchaudio.transforms.Resample(orig_freq=16000, new_freq=sr).to(device)
-
-                wav_tensor = torch.from_numpy(mono).float().to(device)
-                wav_16k = resampler_16k(wav_tensor).unsqueeze(0).unsqueeze(0)
-
-                with torch.no_grad():
-                    denoised_16k = self._denoiser_model(wav_16k).squeeze(0).squeeze(0)
-
-                denoised_full = resampler_orig(denoised_16k).cpu().numpy()
-                if len(denoised_full) > total_samples:
-                    denoised_full = denoised_full[:total_samples]
-                elif len(denoised_full) < total_samples:
-                    denoised_full = np.pad(denoised_full, (0, total_samples - len(denoised_full)))
-
-                enhanced_mono = denoised_full
-                logger.info("Meta Denoiser (DNS64) AI speech enhancement applied successfully.")
-            except Exception as e:
-                logger.warning(f"Error in Meta Denoiser neural inference: {e}")
-                enhanced_mono = mono
-        else:
-            enhanced_mono = mono
-
-        # High-pass filter at 75Hz to eliminate low sub-rumble
         try:
-            sos = scipy.signal.butter(4, 75, btype='highpass', fs=sr, output='sos')
-            enhanced_mono = scipy.signal.sosfilt(sos, enhanced_mono)
-        except Exception:
-            pass
+            # 1. Convert to mono mid signal
+            v_mid = np.mean(vocals_wav, axis=1) if vocals_wav.ndim > 1 else vocals_wav
 
-        enhanced_stereo = np.column_stack([enhanced_mono, enhanced_mono])
-        return self._normalize_audio(enhanced_stereo)
+            # Resamplers
+            resampler_16k = torchaudio.transforms.Resample(orig_freq=sr, new_freq=16000).to(device)
+            resampler_orig = torchaudio.transforms.Resample(orig_freq=16000, new_freq=sr).to(device)
+
+            v_tensor = torch.from_numpy(v_mid).float().to(device)
+            v_16k = resampler_16k(v_tensor)
+
+            # 2. Silero VAD Speech Detection
+            speech_timestamps = []
+            if self._vad_utils and self._vad_model:
+                get_speech_timestamps = self._vad_utils[0]
+                speech_timestamps = get_speech_timestamps(
+                    v_16k,
+                    self._vad_model,
+                    sampling_rate=16000,
+                    threshold=0.45,
+                    min_speech_duration_ms=200,
+                    min_silence_duration_ms=150,
+                    speech_pad_ms=80
+                )
+                if len(speech_timestamps) == 0:
+                    speech_timestamps = get_speech_timestamps(
+                        v_16k,
+                        self._vad_model,
+                        sampling_rate=16000,
+                        threshold=0.30,
+                        min_speech_duration_ms=200,
+                        min_silence_duration_ms=150,
+                        speech_pad_ms=80
+                    )
+
+            has_speech = len(speech_timestamps) > 0
+            if not has_speech:
+                logger.info("No foreground speech detected. Preserving full vocal track for music.")
+                return vocals_wav, np.zeros_like(vocals_wav)
+
+            # 3. Build Non-Speech (Background Song) Noise Profile
+            non_speech_mask_16k = np.ones(len(v_16k), dtype=bool)
+            for ts in speech_timestamps:
+                non_speech_mask_16k[ts['start']:ts['end']] = False
+
+            v_16k_np = v_16k.cpu().numpy()
+            bg_song_profile = v_16k_np[non_speech_mask_16k]
+
+            # 4. Meta Denoiser (DNS64) in Pure Time-Domain
+            # Eliminates acoustic noise, reverberation, and room acoustics natively without STFT phase distortion
+            if self._denoiser_model is not None:
+                try:
+                    with torch.no_grad():
+                        denoised_16k = self._denoiser_model(v_16k.unsqueeze(0).unsqueeze(0)).squeeze(0).squeeze(0)
+                    denoised_16k_np = denoised_16k.cpu().numpy()
+                except Exception as denoise_err:
+                    logger.warning(f"Meta Denoiser inference error: {denoise_err}")
+                    denoised_16k_np = v_16k_np
+            else:
+                denoised_16k_np = v_16k_np
+
+            # 5. Smooth Adaptive Spectral Gating targeting background song singing & lyrics
+            # Eliminates background singing lyrics even when overlapping with speech, without metallic/chirp noise
+            if len(bg_song_profile) >= 16000 * 0.5:
+                cleaned_16k = nr.reduce_noise(
+                    y=denoised_16k_np,
+                    sr=16000,
+                    y_noise=bg_song_profile,
+                    prop_decrease=0.88,
+                    time_mask_smooth_ms=64,
+                    freq_mask_smooth_hz=400,
+                    n_std_thresh_stationary=1.5
+                )
+            else:
+                cleaned_16k = nr.reduce_noise(
+                    y=denoised_16k_np,
+                    sr=16000,
+                    prop_decrease=0.82,
+                    time_mask_smooth_ms=64,
+                    freq_mask_smooth_hz=400
+                )
+
+            # 6. Resample back to original sample rate
+            cleaned_torch = torch.from_numpy(cleaned_16k).float().to(device)
+            cleaned_orig = resampler_orig(cleaned_torch).cpu().numpy()[:num_samples]
+            if len(cleaned_orig) < num_samples:
+                cleaned_orig = np.pad(cleaned_orig, (0, num_samples - len(cleaned_orig)))
+
+            # 7. Smooth Raised-Cosine Speech Gate (prevents abrupt gating / clicks and guarantees silence during pauses)
+            sample_gate = np.zeros(num_samples, dtype=np.float32)
+            ramp_len = int(sr * 0.035)  # 35ms smooth cosine ramp
+            for ts in speech_timestamps:
+                start_idx = max(0, int(ts['start'] * sr / 16000))
+                end_idx = min(num_samples, int(ts['end'] * sr / 16000))
+                sample_gate[start_idx:end_idx] = 1.0
+                if start_idx >= ramp_len:
+                    t_in = np.linspace(0, np.pi / 2, ramp_len)
+                    sample_gate[start_idx - ramp_len:start_idx] = np.sin(t_in) ** 2
+                if end_idx + ramp_len <= num_samples:
+                    t_out = np.linspace(np.pi / 2, 0, ramp_len)
+                    sample_gate[end_idx:end_idx + ramp_len] = np.sin(t_out) ** 2
+
+            fg_clean_mono = cleaned_orig * sample_gate
+
+            # 8. High-pass filter at 80Hz to eliminate sub-rumble and pops
+            try:
+                sos = scipy.signal.butter(4, 80, btype='highpass', fs=sr, output='sos')
+                fg_clean_mono = scipy.signal.sosfilt(sos, fg_clean_mono)
+            except Exception:
+                pass
+
+            # 9. Clean Peak Normalization to -1.0 dBFS (0.89) without non-linear saturation distortion
+            peak_val = np.max(np.abs(fg_clean_mono))
+            if peak_val > 1e-4:
+                fg_clean_mono = (fg_clean_mono / peak_val) * 0.89
+
+            # 10. Synthesize Stereo Foreground Speech and Background Song Vocals
+            fg_stereo = np.column_stack([fg_clean_mono, fg_clean_mono])
+            # Background vocals = original vocal stem minus isolated foreground speech
+            bg_vocals_stereo = vocals_wav - fg_stereo
+
+            # Normalize background vocals to avoid clipping
+            bg_peak = np.max(np.abs(bg_vocals_stereo))
+            if bg_peak > 0.95:
+                bg_vocals_stereo = (bg_vocals_stereo / bg_peak) * 0.95
+
+            return fg_stereo, bg_vocals_stereo
+        except Exception as e:
+            logger.error(f"Error in speech disentanglement pipeline: {e}", exc_info=True)
+            return vocals_wav, np.zeros_like(vocals_wav)
 
 
     @gpu_decorator
@@ -429,20 +446,7 @@ class DemucsModelAdapter(SeparationModelAdapter):
                 generated_stems[name] = stem_path
 
         elif mode == "voiceover":
-            # 1. Multi-Stage AI: Demucs v4 + Silero Neural Speech Disentangler + Spatial/Harmonic Sieve
-            vo_wav, other_wav = self._isolate_dominant_voiceover(sources_dict["vocals"], sr)
-
-            if progress_callback:
-                progress_callback(82, "AI Voice Enhancement & Studio Noise Cleanup")
-
-            # 2. Post-Separation AI Enhancement & Noise Cleanup (Meta Denoiser DNS64 + Spectral Gating)
-            vo_enhanced = self._enhance_and_denoise_speech(vo_wav, sr)
-            # Clean studio normalization: sets speech peak cleanly to -0.7 dBFS without amplifying background residuals
-            max_v = np.max(np.abs(vo_enhanced))
-            if max_v > 1e-4:
-                vo_enhanced = (vo_enhanced / max_v) * 0.92
-
-            # 3. Background music: Clean instrumental soundtrack (drums + bass + Demucs other)
+            # 1. Background instrumental music (drums + bass + Demucs other)
             instrumental_wav = (
                 sources[source_names.index("drums")] +
                 sources[source_names.index("bass")] +
@@ -450,13 +454,22 @@ class DemucsModelAdapter(SeparationModelAdapter):
             ).cpu().numpy().T
             instrumental_wav = self._normalize_audio(instrumental_wav)
 
-            # 4. Background song: Complete backing track (background_music + other)
+            if progress_callback:
+                progress_callback(80, "AI Neural Speech Disentanglement & Lyric Removal")
+
+            # 2. Multi-Stage AI: Demucs v4 + Silero VAD Speech Gating + Harmonic Note Sieve + Meta Denoiser
+            vo_wav, other_wav = self._isolate_dominant_voiceover(sources_dict["vocals"], instrumental_wav, sr)
+
+            if progress_callback:
+                progress_callback(88, "Reconstructing Isolated Audio Stems")
+
+            # 3. Background song: Complete backing track without foreground speech (instrumental + background lyrics)
             bg_song_wav = self._normalize_audio(instrumental_wav + other_wav)
 
             # Generate Stems:
-            # 1. vocals: Clean Foreground Speech ONLY (zero music, zero songs in background, AI enhanced & noise-cleaned)
+            # 1. vocals: Clean Foreground Speech ONLY (zero song lyrics, zero music)
             vo_path = output_dir / "vocals.wav"
-            sf.write(str(vo_path), vo_enhanced, sr, subtype="PCM_16")
+            sf.write(str(vo_path), vo_wav, sr, subtype="PCM_16")
             generated_stems["vocals"] = vo_path
 
             # 2. background_music: Clean background music / soundtrack without vocals

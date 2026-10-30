@@ -23,9 +23,13 @@ export default function StemMixer({ job, project, onNewSeparation }: StemMixerPr
   const [masterVolume, setMasterVolume] = useState(1.0);
   const [peaks, setPeaks] = useState<Record<string, number[]>>({});
 
-  // Filter only Vocal (Foreground Speech) and Background Music
+  // Stems to display: Pure Speech, Clean Instrumental Music, and Backing Track (with Song Lyrics)
   const visibleStems = job.stems.filter(
-    (s) => s.stem_type === 'vocals' || s.stem_type === 'background_music' || s.stem_type === 'instrumental'
+    (s) =>
+      s.stem_type === 'vocals' ||
+      s.stem_type === 'background_music' ||
+      s.stem_type === 'instrumental' ||
+      s.stem_type === 'background_song'
   );
 
   // Track volume, solo, mute states
@@ -39,11 +43,16 @@ export default function StemMixer({ job, project, onNewSeparation }: StemMixerPr
     const engine = new StemLabAudioEngine();
     engineRef.current = engine;
 
-    // Initialize track states
+    // Initialize track states: Speech & Clean Music active; Backing Song muted by default to prevent audio doubling
     const initialStates: Record<string, { volume: number; isMuted: boolean; isSoloed: boolean }> = {};
     visibleStems.forEach((s) => {
       const isVoice = s.stem_type === 'vocals' || s.stem_type === 'voiceover';
-      initialStates[s.id] = { volume: isVoice ? 1.3 : 0.85, isMuted: false, isSoloed: false };
+      const isBackingSong = s.stem_type === 'background_song' || s.stem_type === 'other';
+      initialStates[s.id] = {
+        volume: isVoice ? 1.3 : 0.85,
+        isMuted: isBackingSong,
+        isSoloed: false,
+      };
     });
     setTrackStates(initialStates);
 

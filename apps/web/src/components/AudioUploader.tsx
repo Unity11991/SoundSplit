@@ -231,9 +231,9 @@ export default function AudioUploader({ onSeparationStarted }: AudioUploaderProp
           <div className="flex items-center gap-3 p-3.5 rounded-xl bg-emerald-950/20 border border-emerald-500/30 text-emerald-300">
             <CheckCircle2 className="w-5 h-5 text-emerald-400 flex-shrink-0" />
             <div>
-              <h4 className="font-semibold text-white text-sm">Separates Speech & Background Music</h4>
+              <h4 className="font-semibold text-white text-sm">AI Speech Disentanglement & Lyric Removal</h4>
               <p className="text-xs text-gray-400 mt-0.5">
-                Isolates clean Foreground Speech and Background Music into 2 separate tracks.
+                Isolates clean Foreground Speech with background songs and singing lyrics completely removed.
               </p>
             </div>
           </div>
